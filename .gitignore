@@ -1,0 +1,25 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# datasets / outputs
+outputs/
+data/
+*.jsonl
+*.bin
+*.pt
+*.safetensors
+
+# HF / vLLM caches
+.cache/
+hf_cache/
+assets/hub/
+wandb/
+
+# OS
+.DS_Store
