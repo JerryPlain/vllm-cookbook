@@ -1,162 +1,224 @@
-# vLLM Cookbook
+# vLLM Cookbook: End-to-End Privacy Alignment Pipeline
 
-A structured, reproducible repository for vLLM inference workflows, including baseline generation, prompt construction, tensor-parallel validation, and LoRA runtime injection.
+This repository implements a complete, code-aligned workflow:
 
-## 1. Scope
+1. LoRA-based SFT fine-tuning (`train_sft.py`)
+2. vLLM response generation (`response_generation.py`)
+3. Qwen3 Privacy Guard evaluation (`response_evaluation.py` + `evaluators/Qwen3PrivacyGuard_vllm.py`)
+4. Structured outputs and aggregated metrics (`summary.json`)
 
-This repository is designed for three engineering objectives:
+This document reflects the current implementation in the repository.
 
-1. **Reproducibility**: each knowledge point is mapped to a runnable script.
-2. **Operational stability**: frequent failure modes are handled through fail-fast checks.
-3. **Knowledge retention**: principles and troubleshooting guidance are documented in Chinese technical notes.
+## 1. Repository Structure
 
-## 2. Repository Layout
-
-- `examples/`: scenario-specific runnable scripts
-- `scripts/`: shell entry points with consistent environment defaults
-- `src/vllm_cookbook/`: reusable helper modules
-- `docs/`: concise English notes
+- `train_sft.py`: LoRA SFT entry point (TRL `SFTTrainer`)
+- `response_generation.py`: batch response generation with vLLM (supports LoRARequest)
+- `response_evaluation.py`: Qwen3Guard-based evaluation and summary export
+- `evaluators/Qwen3PrivacyGuard_vllm.py`: vLLM-based judge implementation
+- `evaluators/system_prompts/system_prompt_response_evaluation_20260109.txt`: judge system prompt
+- `examples/`: minimal reference scripts (generation, chat template, LoRA injection, TP checks)
+- `src/vllm_cookbook/`: reusable utilities (for example, TP validation)
 - `docs/zh/`: Chinese deep-dive documentation
-- `tests/`: lightweight validation
 
-## 3. Installation
+## 2. Pipeline Overview
+
+### Stage A: SFT Training (LoRA)
+
+Entry: `train_sft.py`
+
+Objective:
+- Fine-tune LoRA adapters on a base model
+- Save adapter checkpoints by epoch
+
+Core behavior:
+- Input format: `[{"instruction": "...", "output": "..."}]`
+- Label masking: prompt tokens use `-100`, target tokens contribute to loss
+- `PeftSavingCallback` persists adapter checkpoints at save events
+
+Output path:
+- `./sft_results/<dataset_name>/<model_suffix>/checkpoint-epoch-<E>`
+
+These checkpoints can be consumed directly by vLLM `LoRARequest`.
+
+### Stage B: Response Generation (vLLM)
+
+Entry: `response_generation.py`
+
+Objective:
+- Generate model responses on evaluation datasets
+- Support both base-model and LoRA-adapter inference
+
+Core behavior:
+- `tensor_parallel_size = --num_gpus`
+- Non-empty `--adapter_path` enables `enable_lora=True` + `LoRARequest`
+- Stable `run_id` is derived from adapter path to avoid run collisions
+- If eval output already exists and `--overwrite` is not set, the run is skipped
+
+Output path:
+- `model_responses/<dataset_name>/<run_id>/response_by_<model_alias>.json`
+
+### Stage C: Response Evaluation (Qwen3Guard)
+
+Entry: `response_evaluation.py`
+
+Objective:
+- Evaluate `(question, response)` pairs with a judge model
+- Produce per-sample annotations and global summary statistics
+
+Core behavior:
+- Uses `Evaluator_Qwen3PrivacyGuard` (vLLM inference)
+- Parses XML labels into structured fields:
+  - `refuse`
+  - `disclose`
+  - `privacy`
+  - `guidance`
+- Writes aggregate metrics to `summary.json` (`counts` and `rates`)
+
+Output paths:
+- `eval_results/<dataset_name>/<run_id>/eval_results_target=<target_model_name>.json`
+- `eval_results/<dataset_name>/<run_id>/summary.json`
+
+## 3. End-to-End Commands
+
+### 3.1 Train LoRA Adapter
 
 ```bash
-pip install -e .
+python3 train_sft.py \
+  --model_name Qwen/Qwen2.5-7B-Instruct \
+  --data_path ./data/sft_train.json \
+  --learning_rate 5e-5 \
+  --num_train_epochs 5 \
+  --per_device_train_batch_size 8 \
+  --gradient_accumulation_steps 4 \
+  --lora_r 16 \
+  --lora_alpha 32
 ```
 
-## 4. Quick Start
+Example adapter checkpoint after training:
+`./sft_results/<dataset>/<model>/checkpoint-epoch-5`
 
-Run baseline generation:
+### 3.2 Generate Responses with vLLM
 
 ```bash
-bash scripts/run_minimal.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 response_generation.py \
+  --dataset_name multi_opensource_v1 \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --adapter_path ./sft_results/<dataset>/<model>/checkpoint-epoch-5 \
+  --num_gpus 4 \
+  --max_tokens 2048 \
+  --output_dir ./model_responses \
+  --eval_root ./eval_results
 ```
 
-Run LoRA path:
+For base-model inference, leave `--adapter_path` empty.
+
+### 3.3 Evaluate Responses with Qwen3Guard
 
 ```bash
-LORA_PATH=/path/to/lora/checkpoint bash scripts/run_lora.sh
+python3 response_evaluation.py \
+  --input_path ./model_responses/multi_opensource_v1/<run_id>/response_by_Qwen2.5-7B-Instruct.json \
+  --output_dir ./eval_results \
+  --dataset_name multi_opensource_v1 \
+  --target_model_name Qwen2.5-7B-Instruct \
+  --model_path ./Qwen3-4B-Instruct-2507_V1 \
+  --system_prompt_path system_prompt_response_evaluation_20260109.txt \
+  --batch_size 1 \
+  --max_new_tokens 2560
 ```
 
-## 5. Example Matrix
+## 4. Data Contracts
 
-| Script | Primary Purpose | Recommended Usage |
-|---|---|---|
-| `examples/00_minimal_generate.py` | Minimal end-to-end vLLM generation | First run on a new machine / new model |
-| `examples/01_chat_template.py` | Chat-template-based prompt construction | Chat/instruct models with role formatting |
-| `examples/02_token_ids_api.py` | Direct `prompt_token_ids` inference | Token-level control, cached token pipelines |
-| `examples/03_lora_request.py` | Runtime LoRA injection via `LoRARequest` | Multi-adapter serving and A/B adapter checks |
-| `examples/04_tp_check_heads.py` | Tensor parallel validity check | Before changing TP or launching long jobs |
-| `examples/Qwen3PrivacyGuard_vllm.py` | Judge-style safety evaluation pipeline | Structured scoring for `(question, response)` pairs |
+### 4.1 SFT Input Contract (`train_sft.py`)
 
-## 6. Recommended Execution Order
+Each sample must include:
+- `instruction` (str)
+- `output` (str)
 
-1. Validate baseline runtime with `00_minimal_generate.py`.
-2. Select prompt interface:
-   - chat workflow: `01_chat_template.py`
-   - token-id workflow: `02_token_ids_api.py`
-3. Add adapter evaluation with `03_lora_request.py` if LoRA is required.
-4. Validate TP legality with `04_tp_check_heads.py` prior to larger runs.
+### 4.2 Generation Dataset Contract (`response_generation.py`)
 
-## 7. Key Runtime Parameters
+Current built-in registry entry:
+- `multi_opensource_v1` -> `./eval_datasets/alignment_data_v2_privacy_leakage.json`
 
-- `tensor_parallel_size`
-  - Tensor-parallel degree.
-  - Must satisfy: `num_attention_heads % tensor_parallel_size == 0`.
+Each sample should include:
+- `question` (str)
 
-- `pipeline_parallel_size`
-  - Pipeline-parallel degree.
-  - Default `1` in this repository to prioritize debuggability and reproducibility.
+### 4.3 Evaluation Input Contract (`response_evaluation.py`)
 
-- `gpu_memory_utilization`
-  - Fraction of GPU memory allocated to vLLM.
-  - Higher values may improve throughput but increase OOM risk.
+Each sample in the evaluation input JSON must include:
+- `question` (str)
+- `response` (str)
 
-- `max_model_len`
-  - Maximum context length.
-  - Directly affects KV cache memory footprint.
+## 5. Qwen3PrivacyGuard Evaluator Design
 
-- `enable_chunked_prefill`
-  - Improves robustness for long-context prefill on many workloads.
+File: `evaluators/Qwen3PrivacyGuard_vllm.py`
 
-- `enforce_eager`
-  - Generally easier to debug and often more stable across heterogeneous environments.
+### 5.1 Responsibilities
 
-- `disable_custom_all_reduce`
-  - Useful in environments where custom collective kernels are unstable.
+- Start a judge model with vLLM
+- Build evaluation prompts (system + user template)
+- Generate judge outputs
+- Parse labels from `<answer>...</answer>`
 
-## 8. LoRA Runtime Flow
+### 5.2 Prompt Construction (`format_prompt`)
 
-In `examples/03_lora_request.py`, the workflow is:
+`format_prompt` applies token-budget-aware truncation:
 
-1. Validate TP compatibility with `assert_tp_valid`.
-2. Initialize `LLM(..., enable_lora=True)`.
-3. Build `LoRARequest` when `LORA_PATH` is provided.
-4. Execute generation with or without adapter on the same baseline path.
+1. Estimate fixed template overhead tokens
+2. Allocate remaining budget across question and response
+3. Keep question tail and response head
 
-This design supports direct comparison between base and adapter behaviors under identical runtime settings.
+This preserves high-signal content under long-input constraints.
 
-## 9. Troubleshooting
+### 5.3 Output Parsing (`extract_xml_output`)
 
-- **TP configuration error**
-  1. Execute `examples/04_tp_check_heads.py`.
-  2. Adjust TP until divisibility is satisfied.
+Expected format:
 
-- **CUDA OOM**
-  1. Reduce `max_model_len`.
-  2. Lower `gpu_memory_utilization`.
-  3. Reduce concurrency and re-validate with `TP=1`.
+```xml
+<answer>
+  <refuse>0|1</refuse>
+  <disclose>0|1</disclose>
+  <privacy>0|1</privacy>
+  <guidance>0|1</guidance>
+</answer>
+```
 
-- **LoRA load/effect issue**
-  1. Verify `LORA_PATH`.
-  2. Confirm base-model inference first.
-  3. Re-test adapter path with conservative settings (`TP=1`).
+## 6. Key Artifacts
 
-## 10. Environment Variables
+- Split cache: `./sft_training_data/<dataset_name>/train_split_*.json`
+- LoRA checkpoints: `./sft_results/<dataset_name>/<model_suffix>/checkpoint-epoch-*`
+- Generated responses: `./model_responses/<dataset>/<run_id>/response_by_<model>.json`
+- Full evaluation output: `./eval_results/<dataset>/<run_id>/eval_results_target=<model>.json`
+- Summary metrics: `./eval_results/<dataset>/<run_id>/summary.json`
 
-Defined in `.env.example`:
+## 7. Operational Notes
 
-- `CUDA_VISIBLE_DEVICES`
-- `VLLM_DOWNLOAD_DIR`
-- `MODEL`
-- `TP`
-- `LORA_PATH`
+- TP validity rule: `num_attention_heads % tensor_parallel_size == 0`
+- `response_generation.py` and evaluator both run with `pipeline_parallel_size=1`
+- `run_id` is adapter-path-aware for experiment traceability
+- Existing evaluation outputs are skipped unless `--overwrite` is set
+- Generation and evaluation are separate CLI stages by design
 
-## 11. Qwen3 Privacy Guard Script
+## 8. Quick Diagnostics
 
-`examples/Qwen3PrivacyGuard_vllm.py` is a judge-model pipeline rather than a general chat demo.
+1. Verify TP divisibility before generation (`examples/04_tp_check_heads.py`)
+2. Ensure `dataset_name` exists in `DATASET_REGISTRY`
+3. Ensure evaluation `input_path` matches generation output
+4. Keep `target_model_name` consistent for traceable output naming
+5. Verify judge `model_path` and `system_prompt_path` are accessible
 
-### 11.1 Purpose
+## 9. Minimal Reference Scripts
 
-Given `(question, response)` pairs, the model produces structured XML labels under `<answer>...</answer>` for safety-oriented classification:
+These scripts are learning-oriented references, not replacements for the full pipeline:
 
-- `refuse`
-- `disclose`
-- `privacy`
-- `guidance`
+- `examples/00_minimal_generate.py`
+- `examples/01_chat_template.py`
+- `examples/02_token_ids_api.py`
+- `examples/03_lora_request.py`
+- `examples/04_tp_check_heads.py`
 
-### 11.2 Processing Stages
+## 10. Chinese Documentation
 
-1. Build judge prompts via `format_prompt`.
-2. Optionally apply input-budget truncation.
-3. Run batched generation with vLLM.
-4. Parse XML tags via `extract_xml_output`.
-5. Return structured records for downstream evaluation.
-
-### 11.3 Truncation Policy in `format_prompt`
-
-When `max_input_length` is set:
-
-1. Estimate fixed template overhead.
-2. Reserve a safety margin.
-3. Allocate remaining budget to question/response.
-4. Keep question tail and response head to retain high-signal spans.
-
-This policy improves robustness under long-input constraints while preserving evaluation-relevant content.
-
-## 12. Chinese Documentation
-
+- `docs/zh/README.md`
 - `docs/zh/00_仓库导读.md`
 - `docs/zh/01_vllm核心原理.md`
 - `docs/zh/02_lora注入与服务.md`
