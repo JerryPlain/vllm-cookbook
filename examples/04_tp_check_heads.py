@@ -1,3 +1,8 @@
+"""Standalone TP validator script.
+
+Run this before expensive jobs to verify TP is compatible with the model.
+"""
+
 import os
 
 from vllm_cookbook.tp import assert_tp_valid

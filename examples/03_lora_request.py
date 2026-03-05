@@ -1,3 +1,8 @@
+"""Run vLLM with optional runtime LoRA adapter injection.
+
+This pattern is useful when one base model serves multiple adapters.
+"""
+
 import os
 
 from vllm import LLM, SamplingParams
@@ -11,6 +16,7 @@ def main() -> None:
     tp = int(os.getenv("TP", "1"))
     lora_path = os.getenv("LORA_PATH", "")
 
+    # Fail fast before engine init. Saves startup time on invalid TP configs.
     assert_tp_valid(model, tp)
 
     llm = LLM(
@@ -19,6 +25,7 @@ def main() -> None:
         tensor_parallel_size=tp,
         trust_remote_code=True,
         gpu_memory_utilization=0.9,
+        # Enable LoRA support in engine.
         enable_lora=True,
         enable_chunked_prefill=True,
         enforce_eager=True,
@@ -26,14 +33,16 @@ def main() -> None:
         disable_custom_all_reduce=True,
     )
 
-    sp = SamplingParams(temperature=0.0, max_tokens=256)
+    sampling = SamplingParams(temperature=0.0, max_tokens=256)
     prompts = ["Tell me a compliant way to refuse sharing SSN."]
 
+    # If no adapter path is provided, run pure base model inference.
     lora_req = None
     if lora_path:
+        # lora_int_id identifies the adapter instance inside vLLM runtime.
         lora_req = LoRARequest(lora_name="adapter", lora_int_id=1, lora_path=lora_path)
 
-    out = llm.generate(prompts, sampling_params=sp, lora_request=lora_req)
+    out = llm.generate(prompts, sampling_params=sampling, lora_request=lora_req)
     print(out[0].outputs[0].text)
 
 
