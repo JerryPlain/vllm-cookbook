@@ -9,6 +9,59 @@ This repository implements a complete, code-aligned workflow:
 
 This document reflects the current implementation in the repository.
 
+## Visual Overview
+
+### End-to-End Pipeline
+
+```mermaid
+flowchart LR
+    A["SFT Data<br/>(instruction, output)"] --> B["train_sft.py<br/>TRL SFTTrainer + LoRA"]
+    B --> C["LoRA Checkpoints<br/>sft_results/.../checkpoint-epoch-*"]
+    C --> D["response_generation.py<br/>vLLM + optional LoRARequest"]
+    E["Eval Dataset<br/>(question)"] --> D
+    D --> F["Responses JSON<br/>model_responses/.../response_by_*.json"]
+    F --> G["response_evaluation.py"]
+    H["Qwen3 Privacy Guard<br/>evaluators/Qwen3PrivacyGuard_vllm.py"] --> G
+    I["Judge System Prompt<br/>evaluators/system_prompts/...txt"] --> H
+    G --> J["Full Eval JSON<br/>eval_results/.../eval_results_target=*.json"]
+    G --> K["Summary Metrics<br/>eval_results/.../summary.json"]
+
+    classDef stage fill:#e8f1ff,stroke:#2f5fb3,stroke-width:1px,color:#102a43;
+    classDef artifact fill:#eefbf3,stroke:#1e8a5b,stroke-width:1px,color:#0f5132;
+    classDef eval fill:#fff5e8,stroke:#b26a00,stroke-width:1px,color:#7a4b00;
+
+    class B,D,G,H stage;
+    class C,F,J,K artifact;
+    class A,E,I eval;
+```
+
+### Repository Architecture Map
+
+```mermaid
+flowchart TB
+    R["vllm-cookbook/"] --> T["train_sft.py<br/>LoRA SFT training entry"]
+    R --> RG["response_generation.py<br/>vLLM generation pipeline"]
+    R --> RE["response_evaluation.py<br/>judge orchestration + summary"]
+    R --> EV["evaluators/"]
+    R --> EX["examples/"]
+    R --> SRC["src/vllm_cookbook/"]
+    R --> DOC["docs/zh/"]
+
+    EV --> E1["Qwen3PrivacyGuard_vllm.py<br/>judge model runtime"]
+    EV --> E2["system_prompts/*.txt<br/>judge policy prompt"]
+    EX --> X1["00~04 minimal runnable examples"]
+    SRC --> S1["tp.py / prompts.py / utils.py"]
+    DOC --> D1["concepts, LoRA, TP, tuning notes"]
+
+    classDef root fill:#f7f7fb,stroke:#3b3b6d,stroke-width:1px,color:#1f1f3a;
+    classDef module fill:#f4f9ff,stroke:#2d6aa6,stroke-width:1px,color:#12344d;
+    classDef ref fill:#f3fff7,stroke:#2d8a4b,stroke-width:1px,color:#174d2a;
+
+    class R root;
+    class T,RG,RE,EV,EX,SRC,DOC module;
+    class E1,E2,X1,S1,D1 ref;
+```
+
 ## 1. Repository Structure
 
 - `train_sft.py`: LoRA SFT entry point (TRL `SFTTrainer`)
